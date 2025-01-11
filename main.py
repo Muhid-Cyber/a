@@ -1,92 +1,36 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 import yt_dlp
-import os
-import threading
-import schedule
-import time
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-def download_video(url, file_type):
-    try:
-        output_path = 'audio' if file_type == 'mp3' else 'video'
+def is_valid_youtube_url(url):
+    parsed_url = urlparse(url)
+    if parsed_url.netloc in ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be']:
+        if parsed_url.netloc in ['youtube.com', 'www.youtube.com', 'm.youtube.com']:
+            return "v" in dict(p.split("=",1) for p in parsed_url.query.split("&")) if parsed_url.query else False
+        return parsed_url.path[1:] if parsed_url.netloc == 'youtu.be' else False
+    return False
 
-        if not os.path.exists(output_path):
-            os.makedirs(output_path)
-        if not os.access(output_path, os.W_OK):
-            return {"error": "The output path is not writable."}
-
-        ydl_opts = {}
-        if file_type == "mp3":
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(output_path, '%(title)s.mp3'),
-                'cookiefile': 'youtube_cookies.txt'
-            }
-        elif file_type == "mp4":
-            ydl_opts = {
-                'format': 'bestvideo[height<=480]+bestaudio/best', 
-                'outtmpl': os.path.join(output_path, '%(title)s.%(ext)s'),
-                'cookiefile': 'youtube_cookies.txt',
-                'merge_output_format': 'mp4'
-            }
-        else:
-            return {"error": "Invalid file type. Please choose 'mp3' or 'mp4'."}
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(url, download=True)
-            file_name = ydl.prepare_filename(info_dict)
-            file_name = os.path.basename(file_name)
-            return {"message": "Download successful", "file_name": file_name}
-
-    except yt_dlp.utils.DownloadError as e:
-        return {"error": f"Download error: {str(e)}"}
-    except Exception as e:
-        return {"error": f"An error occurred: {str(e)}"}
-
-@app.route('/download', methods=['GET'])
-def download():
+@app.route('/audio', methods=['GET'])
+def get_audio_info():
     url = request.args.get('url')
-    file_type = request.args.get('type')
-
-    result = download_video(url, file_type)
-    if "error" in result:
-        return jsonify(result), 400
-
-    file_name = result["file_name"]
-    file_type_folder = 'audio' if file_type == 'mp3' else 'video'
-    return jsonify({"download_url": f"{file_type_folder}/{file_name}"})
-
-@app.route('/audio/<filename>', methods=['GET'])
-def get_audio_file(filename):
-    return send_from_directory('audio', filename)
-
-@app.route('/video/<filename>', methods=['GET'])
-def get_video_file(filename):
-    return send_from_directory('video', filename)
-
-def clear_files():
-    folders = ['audio', 'video']
-    for folder in folders:
-        for filename in os.listdir(folder):
-            file_path = os.path.join(folder, filename)
-            try:
-                if os.path.isfile(file_path):
-                    os.unlink(file_path)
-                    print(f"Deleted {file_path}")
-            except Exception as e:
-                print(f"Failed to delete {file_path}. Reason: {str(e)}")
-
-def schedule_clear_files():
-    schedule.every(20).minutes.do(clear_files)
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    if not url:
+        return jsonify({"error": "Missing 'url' parameter."}), 400
+    if not is_valid_youtube_url(url):
+        return jsonify({"error": "Invalid Youtube link format."}), 400
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'format': 'bestaudio', 'extractaudio': True,'nocheckcertificate':True}) as ydl:
+          info_dict = ydl.extract_info(url, download=False)
+          if info_dict:
+            return jsonify({"title": info_dict.get('title', "Unknown Title"),"best_audio_url":info_dict.get('url', "N/A")}), 200
+          return jsonify({"error": "Video not found"}), 404
+    except yt_dlp.utils.DownloadError as e:
+       if 'This video is unavailable' in str(e) :
+          return jsonify({"error": "Video is unavailable or deleted"}), 404
+       if  'Please check your internet connection or try again in a few minutes' in str(e):
+             return jsonify({"error":"Temporary Server Error"}), 503
+       return jsonify({"error": f"An unexpected error happened: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    # Start the file cleanup scheduler in a separate thread
-    cleanup_thread = threading.Thread(target=schedule_clear_files)
-    cleanup_thread.daemon = True
-    cleanup_thread.start()
-
-    app.run(port=3000)
+    app.run(debug=True, port=3000, host='0.0.0.0')
